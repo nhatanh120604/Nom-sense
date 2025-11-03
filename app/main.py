@@ -18,6 +18,7 @@ import logging
 import psutil
 
 LOGGER = logging.getLogger(__name__)
+LOGGER.setLevel(logging.INFO)
 
 
 def _gpu_snapshot() -> Optional[dict[str, float | str]]:
