@@ -233,9 +233,9 @@ export default function App() {
             NXB Khoa học Xã hội, 2018 .
           </p>
           <p className="footer-line">
-            An Introduction to the Study of Nôm Script (Khái luận Văn tự học chữ
-            Nôm), Nguyễn Quang Hồng, Education Publishing House, 2008, and
-            Language. Script. Literature (Ngôn ngữ. Văn tự. Ngữ văn), Nguyễn
+            Source: An Introduction to the Study of Nôm Script (Khái luận Văn tự
+            học chữ Nôm), Nguyễn Quang Hồng, Education Publishing House, 2008,
+            and Language. Script. Literature (Ngôn ngữ. Văn tự. Ngữ văn), Nguyễn
             Quang Hồng, Social Sciences Publishing House, 2018.
           </p>
           <span className="footer-divider" aria-hidden="true" />
