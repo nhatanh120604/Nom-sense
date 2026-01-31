@@ -2,7 +2,7 @@ import type { AskRequest, AskResponse } from "./types";
 
 export const API_BASE =
   (import.meta.env.VITE_API_BASE as string | undefined) ??
-  "http://localhost:8000";
+  "http://localhost:7860";
 const NORMALISED_BASE = API_BASE.endsWith("/") ? API_BASE : `${API_BASE}/`;
 const ASK_ENDPOINT = new URL("ask", NORMALISED_BASE).toString();
 

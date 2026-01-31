@@ -1,24 +1,22 @@
+"""
+RAG Pipeline implementation using LangChain and Pinecone.
+Handles document loading, embedding, retrieval, and LLM generation.
+"""
 from __future__ import annotations
 
 import logging
 from pathlib import Path
 import re
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Any
 from urllib.parse import quote, quote_plus
 
-try:  # Torch is optional at runtime, fall back to CPU if unavailable
-    import torch
-except Exception:  # pragma: no cover - torch might be missing on smaller deployments
-    torch = None  # type: ignore
-
-from langchain_chroma import Chroma
+from langchain_pinecone import PineconeVectorStore, PineconeEmbeddings
+from pinecone import Pinecone
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_openai import ChatOpenAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyMuPDFLoader
-from sentence_transformers import CrossEncoder
 
 from ..schemas import SourceChunk
 from ..settings import Settings
@@ -31,6 +29,9 @@ BOOK_TITLE_BY_FOLDER: Dict[str, str] = {
     "Book2": "Ngôn ngữ. Văn tự. Ngữ văn (Tuyển tập)",
 }
 
+# Hardcoded author for current books as requested
+DEFAULT_AUTHOR = "Nguyen Quang Hong"
+
 
 def iter_document_paths(data_dir: Path, extensions: Iterable[str]) -> List[Path]:
     candidates: set[Path] = set()
@@ -39,15 +40,15 @@ def iter_document_paths(data_dir: Path, extensions: Iterable[str]) -> List[Path]
     return sorted(candidates)
 
 
-def normalise_chapter_label(label: Optional[str]) -> Optional[str]:
+def normalise_chapter_label(label: Optional[str]) -> str:
     if not label:
-        return None
+        return ""
     cleaned = re.sub(r"_+", " ", label)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned or None
+    return cleaned or ""
 
 
-def derive_chapter_metadata(path: Path) -> Dict[str, Optional[str]]:
+def derive_chapter_metadata(path: Path) -> Dict[str, Any]:
     stem = path.stem
     parts = stem.split(".", 1)
     chapter_index: Optional[int] = None
@@ -67,33 +68,53 @@ def load_documents(data_dir: Path, extensions: Sequence[str]) -> List[Document]:
     documents: List[Document] = []
     for path in iter_document_paths(data_dir, extensions):
         chapter_meta = derive_chapter_metadata(path)
-        chapter_meta["chapter"] = normalise_chapter_label(chapter_meta.get("chapter"))
+        chapter_label = normalise_chapter_label(chapter_meta.get("chapter"))
+
         book_key = path.parent.name
         book_title = BOOK_TITLE_BY_FOLDER.get(book_key, book_key.replace("_", " "))
+
         loader = PyMuPDFLoader(str(path))
         for doc in loader.load():
             text = doc.page_content.strip()
             if not text:
                 continue
 
-            doc_meta = chapter_meta.copy()
-            doc_meta["book_key"] = book_key
-            doc_meta["book_title"] = book_title
+            # Strict Metadata Schema: [book-title, page-number, author, chapter]
+            # Default empty strings for missing values
+
             page = doc.metadata.get("page_number")
             if page is None:
                 page = doc.metadata.get("page")
+
+            # Normalize Page Number
             if page is not None:
                 page_number = int(page) + 1
-                doc.metadata["page_number"] = page_number
-                doc_meta["citation_label"] = (
-                    f"{book_title} – {doc_meta['chapter']} - p.{page_number}"
-                )
             else:
-                doc_meta["citation_label"] = f"{book_title} – {doc_meta['chapter']}"
+                page_number = None
 
-            doc.metadata.setdefault("source", str(path))
-            doc.metadata.setdefault("file_name", path.name)
-            doc.metadata.update({k: v for k, v in doc_meta.items() if v is not None})
+            doc_meta: Dict[str, Any] = {
+                "book_title": book_title or "",
+                "page_number": page_number if page_number is not None else "", # Pinecone metadata prefers strings or numbers, but consistent types are good. Let's use int or empty string? Pinecone metadata values must be string, number, boolean, or list of strings. Empty string is safe.
+                "author": DEFAULT_AUTHOR,
+                "chapter": chapter_label,
+                "file_name": path.name,
+                "source": str(path),
+            }
+
+            # Cleanup: ensure 'page_number' is consistent (e.g. keep as int, handle None separately if needed, or just use what we have if it's valid type)
+            # Pinecone allows int.
+
+            # Create citation label for LLM context
+            if page_number:
+                doc_meta["citation_label"] = f"{book_title} – {chapter_label} - p.{page_number}"
+            else:
+                doc_meta["citation_label"] = f"{book_title} – {chapter_label}"
+
+            doc.metadata.update(doc_meta)
+
+            # Remove purely internal or large keys if not needed in metadata filters
+            # doc.metadata.pop("total_pages", None)
+
             documents.append(doc)
 
     if not documents:
@@ -105,65 +126,18 @@ def load_documents(data_dir: Path, extensions: Sequence[str]) -> List[Document]:
 def unique_citations(docs: Sequence[Document]) -> List[str]:
     citations: List[str] = []
     for doc in docs:
-        label = doc.metadata.get("citation_label")
-        if not label:
-            chapter = doc.metadata.get("chapter")
-            page = doc.metadata.get("page_number")
-            book_title = doc.metadata.get("book_title")
-            if chapter and page:
-                chapter_part = f"{chapter} - p.{page}"
-            elif chapter:
-                chapter_part = chapter
-            else:
-                chapter_part = (
-                    doc.metadata.get("file_name")
-                    or doc.metadata.get("source")
-                    or "Unknown source"
-                )
-            if book_title:
-                label = f"{book_title} – {chapter_part}"
-            else:
-                label = chapter_part
+        label = doc.metadata.get("citation_label") or doc.metadata.get("source") or "Unknown"
         if label not in citations:
-            citations.append(label)
+            citations.append(str(label))
     return citations
 
 
 def format_docs(docs: Sequence[Document]) -> str:
     formatted: List[str] = []
     for doc in docs:
-        label = doc.metadata.get("citation_label")
-        if not label:
-            chapter = doc.metadata.get("chapter")
-            page = doc.metadata.get("page_number")
-            book_title = doc.metadata.get("book_title")
-            if chapter and page:
-                chapter_part = f"{chapter} - p.{page}"
-            elif chapter:
-                chapter_part = chapter
-            else:
-                chapter_part = (
-                    doc.metadata.get("file_name")
-                    or doc.metadata.get("source")
-                    or "Unknown source"
-                )
-            if book_title:
-                label = f"{book_title} – {chapter_part}"
-            else:
-                label = chapter_part
+        label = doc.metadata.get("citation_label") or "Unknown Source"
         formatted.append(f"Source: {label}\n{doc.page_content}")
     return "\n\n".join(formatted) if formatted else "No supporting context retrieved."
-
-
-def rerank_documents(
-    question: str, docs: Sequence[Document], reranker: CrossEncoder, top_k: int
-) -> List[Document]:
-    if not docs:
-        return []
-    pairs = [[question, doc.page_content] for doc in docs]
-    scores = reranker.predict(pairs)
-    scored_docs = sorted(zip(scores, docs), key=lambda item: item[0], reverse=True)
-    return [doc for _, doc in scored_docs[:top_k]]
 
 
 class RagService:
@@ -171,15 +145,17 @@ class RagService:
         self.settings = settings
         self.settings.ensure_env()
 
-        self.device = settings.device or self._default_device()
-        LOGGER.info("Using device %s for embeddings and reranker", self.device)
+        LOGGER.info("Initializing Pinecone RAG Service...")
 
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name=settings.embedding_model,
-            model_kwargs={"device": self.device},
-            encode_kwargs={"device": self.device},
+        # Pinecone Embeddings (Serverless Inference)
+        self.embeddings = PineconeEmbeddings(
+            model=settings.pinecone_embedding_model,
+            pinecone_api_key=settings.pinecone_api_key
         )
-        self.reranker = CrossEncoder(settings.rerank_model, device=self.device)
+
+        # Pinecone Client for Reranking and ID generation
+        self.pc = Pinecone(api_key=settings.pinecone_api_key)
+
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=settings.chunk_size,
             chunk_overlap=settings.chunk_overlap,
@@ -224,101 +200,105 @@ Bia chùa Tháp Miếu (1210) có hơn hai chục chữ Nôm, như:
             ]
         )
 
-        self._vectorstore: Optional[Chroma] = None
-
-    def _default_device(self) -> str:
-        if self.settings.device:
-            return self.settings.device
-        if torch is not None and torch.cuda.is_available():  # type: ignore[attr-defined]
-            return "cuda"
-        return "cpu"
-
-    def has_persisted_index(self) -> bool:
-        directory = self.settings.resolved_persist_dir
-        return directory.exists() and any(directory.iterdir())
+        self._vectorstore: Optional[PineconeVectorStore] = None
 
     def load_source_documents(self) -> List[Document]:
         return load_documents(self.settings.resolved_data_dir, (".pdf",))
 
-    def build_or_load_vectorstore(self, force_rebuild: bool = False) -> Chroma:
-        if self._vectorstore is not None and not force_rebuild:
+    def ensure_vectorstore(self) -> PineconeVectorStore:
+        if self._vectorstore is not None:
             return self._vectorstore
 
-        persist_directory = str(self.settings.resolved_persist_dir)
-        if not force_rebuild and self.has_persisted_index():
-            LOGGER.info("Loading existing Chroma index from %s", persist_directory)
-            self._vectorstore = Chroma(
-                persist_directory=persist_directory,
-                embedding_function=self.embeddings,
-            )
-            return self._vectorstore
+        # Assume the index exists (User responsibility to create index).
+        # Global Search: Use the default namespace (None) or a specific one if configured.
+        # Use declared namespace for project isolation.
 
-        LOGGER.info("Building new Chroma index at %s", persist_directory)
-        documents = self.load_source_documents()
-        chunks = self.splitter.split_documents(documents)
-        self._vectorstore = Chroma.from_documents(
-            chunks,
+        self._vectorstore = PineconeVectorStore(
+            index_name=self.settings.pinecone_index_name,
             embedding=self.embeddings,
-            persist_directory=persist_directory,
-        )
-        LOGGER.info(
-            "Indexed %s chunks from %s source passages",
-            len(chunks),
-            len(documents),
+            pinecone_api_key=self.settings.pinecone_api_key,
+            namespace=self.settings.pinecone_namespace
         )
         return self._vectorstore
 
-    def ensure_vectorstore(self, force_rebuild: bool = False) -> Chroma:
-        return self.build_or_load_vectorstore(force_rebuild=force_rebuild)
-
     def ingest(self, force_rebuild: bool = False) -> None:
-        self.ensure_vectorstore(force_rebuild=force_rebuild)
+        """
+        Ingest documents into Pinecone.
+        Note: force_rebuild=True in Pinecone context typically implies "delete all and re-upload".
+        Current implementation simply adds documents. Deletion is resource-intensive on a remote index.
+        """
+        vectorstore = self.ensure_vectorstore()
+        documents = self.load_source_documents()
+        chunks = self.splitter.split_documents(documents)
+
+        if force_rebuild:
+            LOGGER.info("Delete all vectors in index before ingesting...")
+            # Deleting everything in the namespace (assuming default namespace)
+            index = self.pc.Index(self.settings.pinecone_index_name)
+            try:
+                index.delete(delete_all=True)
+            except Exception as e:
+                LOGGER.warning("Failed to delete index contents: %s", e)
+
+        LOGGER.info("Adding %s chunks to Pinecone...", len(chunks))
+
+        # Batching to avoid Rate Limits (250k tokens/min).
+        # Assumption: ~500 tokens per chunk average.
+        # Batch size 32 = ~16k tokens.
+        # Sleeping 2 seconds between batches.
+        batch_size = 32
+        import time
+
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i : i + batch_size]
+            LOGGER.info(f"Ingesting batch {i // batch_size + 1}/{(len(chunks) - 1) // batch_size + 1} ({len(batch)} chunks)...")
+            try:
+                vectorstore.add_documents(batch)
+            except Exception as e:
+                LOGGER.error(f"Error ingesting batch {i}: {e}")
+                # Wait longer if we hit an error (likely rate limit)
+                time.sleep(10)
+                # Retry once? For now just log and continue/sleep
+                try:
+                     vectorstore.add_documents(batch)
+                except Exception as retry_e:
+                     LOGGER.error(f"Retry failed for batch {i}: {retry_e}")
+
+            time.sleep(2)
+
+        LOGGER.info("Ingestion complete.")
 
     def _build_source_payload(self, doc: Document) -> SourceChunk:
-        book_title = doc.metadata.get("book_title")
-        label = doc.metadata.get("citation_label")
-        if not label:
-            chapter = doc.metadata.get("chapter")
-            page = doc.metadata.get("page_number")
-            if chapter and page:
-                chapter_part = f"{chapter} - p.{page}"
-            elif chapter:
-                chapter_part = chapter
-            else:
-                chapter_part = (
-                    doc.metadata.get("file_name")
-                    or doc.metadata.get("source")
-                    or "Unknown source"
-                )
-            label = f"{book_title} – {chapter_part}" if book_title else chapter_part
-        page_number = doc.metadata.get("page_number")
-        chapter = doc.metadata.get("chapter")
-        file_name = doc.metadata.get("file_name")
-        source_path = doc.metadata.get("source")
-        viewer_url = self._build_viewer_url(
-            file_name=file_name, page_number=page_number, snippet=doc.page_content
-        )
+        # Use flattened metadata structure
+        meta = doc.metadata
         return SourceChunk(
-            label=label,
-            page_number=page_number,
-            chapter=chapter,
-            book_title=book_title,
-            file_name=file_name,
-            source_path=source_path,
+            label=meta.get("citation_label", ""),
+            page_number=meta.get("page_number", ""),
+            chapter=meta.get("chapter", ""),
+            book_title=meta.get("book_title", ""),
+            file_name=meta.get("file_name", ""),
+            source_path=meta.get("source", ""),
             text=doc.page_content,
-            viewer_url=viewer_url,
+            viewer_url=self._build_viewer_url(
+                file_name=meta.get("file_name"),
+                page_number=meta.get("page_number"),
+                snippet=doc.page_content
+            ),
         )
 
     def _build_viewer_url(
-        self, *, file_name: Optional[str], page_number: Optional[int], snippet: str
+        self, *, file_name: Optional[str], page_number: Any, snippet: str
     ) -> Optional[str]:
         if not self.settings.serve_docs or not file_name:
             return None
         base = self.settings.docs_mount_path.rstrip("/") or "/docs"
         url = f"{base}/{quote(file_name)}"
         fragments: List[str] = []
-        if page_number is not None:
+
+        # page_number in metadata might be int or str, need to handle both
+        if page_number is not None and str(page_number) != "":
             fragments.append(f"page={page_number}")
+
         if snippet:
             search_term = quote_plus(snippet[:120])
             fragments.append(f"search={search_term}")
@@ -337,18 +317,44 @@ Bia chùa Tháp Miếu (1210) có hơn hai chục chữ Nôm, như:
         rerank: bool = True,
     ) -> Dict[str, object]:
         vectorstore = self.ensure_vectorstore()
-        k = pool_size or self.settings.retriever_k
-        chosen_top_k = top_k or self.settings.rerank_top_k
-        retriever = vectorstore.as_retriever(search_kwargs={"k": k})
-        candidate_docs = retriever.invoke(question)
-        if rerank:
-            docs = rerank_documents(
-                question, candidate_docs, self.reranker, chosen_top_k
-            )
-        else:
-            docs = list(candidate_docs[:chosen_top_k])
 
-        context_text = format_docs(docs)
+        # 1. Retrieval (High Recall)
+        k = pool_size or self.settings.retriever_k
+        # Plain similarity search (no collection/namespace filtering implies Global Search)
+        candidate_docs = vectorstore.similarity_search(question, k=k)
+
+        # 2. Reranking (High Precision)
+        chosen_top_k = top_k or self.settings.rerank_top_k
+        final_docs = candidate_docs
+
+        if rerank and candidate_docs:
+            docs_content = [d.page_content for d in candidate_docs]
+            try:
+                # Pinecone Inference Rerank
+                result = self.pc.inference.rerank(
+                    model=self.settings.pinecone_rerank_model,
+                    query=question,
+                    documents=docs_content,
+                    top_n=chosen_top_k,
+                    return_documents=False # We map back by index
+                )
+
+                # Map back results to document objects
+                reranked_docs = []
+                for item in result.data:
+                    idx = item.index
+                    doc = candidate_docs[idx]
+                    # Optionally attach score: doc.metadata["rerank_score"] = item.score
+                    reranked_docs.append(doc)
+                final_docs = reranked_docs
+            except Exception as e:
+                LOGGER.error("Pinecone Reranking failed: %s. Falling back to raw similarity.", e)
+                final_docs = candidate_docs[:chosen_top_k]
+        else:
+            final_docs = candidate_docs[:chosen_top_k]
+
+        # 3. Generation
+        context_text = format_docs(final_docs)
         if additional_context:
             extra = additional_context.strip()
             context_text = f"{extra}\n\n{context_text}" if context_text else extra
@@ -365,8 +371,8 @@ Bia chùa Tháp Miếu (1210) có hơn hai chục chữ Nôm, như:
                 self.llm.temperature = previous_temperature
 
         answer = response.content.strip()
-        citations = unique_citations(docs)
-        sources = [self._build_source_payload(doc) for doc in docs]
+        citations = unique_citations(final_docs)
+        sources = [self._build_source_payload(doc) for doc in final_docs]
         return {
             "answer": answer,
             "citations": citations,

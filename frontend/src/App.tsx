@@ -92,7 +92,7 @@ export default function App() {
       </div>
       <div className="app-shell">
         <section className="hero-card">
-          <h1 className="hero-title">NômSense</h1>
+          <h1 className="hero-title">Nom-sense</h1>
           <p className="hero-subtitle">
             Hỏi đáp với Gs. Nguyễn Quang Hồng về chữ Nôm.
           </p>

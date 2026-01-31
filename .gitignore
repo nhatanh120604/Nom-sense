@@ -22,10 +22,12 @@ Word/
 *.nbconvert.ipynb
 
 # Local configuration
-config/.env
-config/*.local
+backend/config/.env
+backend/config/*.local
+frontend/.env
+frontend/.env.local
 
-# Chroma vector store artifacts
+# Chroma vector store artifacts (Legacy)
 chroma_db/
 
 # Logs and temp files
@@ -38,7 +40,6 @@ Thumbs.db
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
-frontend/.env.local
 
 # Editor settings
 .vscode/

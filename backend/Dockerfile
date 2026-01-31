@@ -21,7 +21,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the application code
 COPY --chown=user . .
 
-# Fix permissions for /app directory to allow writing (for chroma_db creation)
+# Fix permissions for /app directory to allow writing
 RUN chown -R user:user /app
 
 # Make the start script executable
@@ -32,7 +32,6 @@ USER user
 
 # Set environment variables
 ENV PORT=7860
-ENV PERSIST_DIR=/app/chroma_db
 ENV PATH="/home/user/.local/bin:$PATH"
 ENV PYTHONPATH=/app
 

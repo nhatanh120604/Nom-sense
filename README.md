@@ -1,169 +1,156 @@
 ---
-title: Fulbright Nôm Library RAG
-emoji: 📚
+title: Nom-sense
 colorFrom: blue
 colorTo: indigo
 sdk: docker
 pinned: false
 ---
 
-# Fulbright Nôm Library – RAG Chat Experience
+# Nom-sense
 
-A full-stack Retrieval-Augmented Generation (RAG) assistant that lets readers explore the Fulbright Hán-Nôm library collection. The backend runs a FastAPI + LangChain pipeline backed by a Chroma vector store and OpenAI chat completions, while the frontend delivers a refined React interface with animated visuals, source citations, and in-place PDF previewing.
+## Overview
+This project is an AI-powered retrieval-augmented generation (RAG) assistant designed for the Fulbright Hán-Nôm library collection. It allows users to ask questions in natural language and receive accurate answers grounded in the library's documents. The system leverages advanced vector search to find relevant book passages and uses a Large Language Model (LLM) to synthesize answers with precise page-level citations.
 
----
+## Feature Highlights
+- **Conversational Search:** Ask questions naturally in Vietnamese or English.
+- **Accurate Citations:** Every answer includes direct links to the source book, chapter, and page number using a strict metadata schema.
+- **Instant PDF Preview:** Users can click citations to view the exact page in the document viewer side-by-side with the chat.
+- **Global Search:** Searches across the entire collection simultaneously without requiring namespace selection.
+- **Full Cloud Architecture:** Uses Pinecone Serverless for vector storage, embedding generation (`multilingual-e5-large`), and reranking (`bge-reranker-v2-m3`), removing heavy local dependencies.
+- **Standalone Ingestion:** Portable Python script for easy migrating and updating of the knowledge base.
 
-## Highlights
+## Tech Stack
+- **Backend:** Python, Flask, Waitress
+- **AI & RAG:**
+    - **Vector Database:** Pinecone (Serverless)
+    - **Embeddings:** Pinecone Inference (`multilingual-e5-large`)
+    - **Reranking:** Pinecone Inference (`bge-reranker-v2-m3`)
+    - **LLM:** OpenAI (`gpt-4o-mini` or configurable)
+    - **Framework:** LangChain
+- **Frontend:** React, Vite, TypeScript
+- **Infrastructure:** Docker (optional)
 
-- **Conversational search with citations** – Each answer includes page-accurate references that you can expand or preview instantly.
-- **Document ingestion pipeline** – Scripts ingest PDFs or text into a persistent Chroma DB, using Hugging Face embeddings and optional cross-encoder reranking.
-- **Luxurious frontend** – Custom Vite/React UI with aurora-inspired theming, highlight animations, and smooth scrolling between answers and source material.
-- **Configurable stack** – Environment-driven knobs for retrieval sizes, chunking, reranking, embedding models, and OpenAI chat models.
+## Technical Description
 
----
+### System Architecture
+The system consists of a **Flask** backend API and a **React** frontend SPA.
+
+1.  **Ingestion Pipeline:**
+    - Source PDFs in the `Word/` directory are processed by `scripts/ingest_pinecone.py`.
+    - Documents are split into chunks.
+    - Metadata (Book Title, Author "Nguyen Quang Hong", Chapter, Page Number) is rigorously extracted and normalized.
+    - Chunks are embedded and stored in a **Pinecone** index.
+
+2.  **Retrieval & Generation Flow (`/ask` endpoint):**
+    - The backend receives a user question.
+    - It generates an embedding for the question using Pinecone's API.
+    - **Vector Search:** Queries Pinecone for the top related chunks (Global Search).
+    - **Reranking:** The top results are re-ordered using Pinecone's Re-ranking model for higher precision.
+    - **Synthesis:** The finalized context and question are sent to the OpenAI LLM to generate an answer.
+    - The response containing the answer and citation metadata is sent back to the frontend.
+
+3.  **Frontend Interaction:**
+    - The React app sends requests to the Flask API.
+    - It renders the answer with citation buttons.
+    - Clicking a citation makes a request to serve the static PDF file, displaying it in the integrated viewer.
 
 ## Architecture Overview
 
 ```text
-├── app/                # FastAPI service and LangChain RAG pipeline
-│   ├── main.py         # API entry-point (`/ask` endpoint)
-│   ├── rag/            # Retrieval, prompt, and LLM orchestration
-│   ├── deps.py         # Dependency wiring for routers/services
-│   └── settings.py     # Pydantic settings (reads `config/.env`)
-├── scripts/
-│   └── ingest.py       # CLI to build / refresh the vector store
-├── chroma_db/          # Persisted vector store (generated)
-├── frontend/           # Vite + React spa (chat experience)
-│   ├── src/App.tsx     # Main UI logic, scrolling, citations
-│   ├── src/client.ts   # Thin fetch client for `/ask`
-│   └── src/styles.css  # Theme, animation, layout
-├── config/
-│   ├── .env.example    # Sample backend configuration
-│   └── .env            # Your actual secrets (ignored from VCS)
-├── requirements.txt    # Backend Python dependencies
-└── README.md           # You are here
+├── backend/            # Flask service, RAG pipeline, and ingestion
+│   ├── app/            # Main application code
+│   ├── config/         # Environment variables
+│   ├── scripts/        # Ingestion scripts
+│   ├── Word/           # Source PDF documents
+│   ├── API.md          # API Documentation
+│   └── requirements.txt
+├── frontend/           # React + Vite SPA
+│   ├── src/            # Components, hooks, styles
+│   └── package.json
+└── README.md           # Project documentation
 ```
 
----
+## Installation
 
-## Prerequisites
+### Prerequisites
+- Python 3.10 or higher
+- Node.js 18+ (for frontend)
+- Pinecone API Key (with Index created)
+- OpenAI API Key
 
-- **Python 3.10+** (tested with CPython, conda or venv recommended)
-- **Node.js 18+** and npm for the frontend
-- An **OpenAI API key** (or compatible endpoint) with access to the configured chat model
-- Optional: GPU-enabled PyTorch environment if you plan to run large rerankers locally
+### Backend Setup
+1.  **Clone the repository:**
+    ```bash
+    git clone <repository_url>
+    cd Nom-sense/backend
+    ```
 
----
+2.  **Install dependencies:**
+    ```bash
+    python -m venv .venv
+    # Windows:
+    .\.venv\Scripts\Activate.ps1
+    # Mac/Linux:
+    source .venv/bin/activate
 
-## Quick Start
+    pip install -r requirements.txt
+    ```
 
-### 1. Clone & prepare environments
+3.  **Configure Environment:**
+    Copy the example configuration:
+    ```bash
+    cp config/.env.example config/.env
+    # On Windows: copy config\.env.example config\.env
+    ```
+    Edit `config/.env` and add your keys:
+    ```env
+    OPENAI_API_KEY=sk-...
+    PINECONE_API_KEY=pc-...
+    PINECONE_INDEX_NAME=chat-nombot
+    PINECONE_NAMESPACE=nom_sense
+    DATA_DIR=Word
+    ```
 
-```powershell
-# In PowerShell
-cd AI-chatbot-2
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
+4.  **Ingest Data:**
+    Run the standalone ingestion script to populate Pinecone:
+    ```bash
+    python scripts/ingest_pinecone.py
+    ```
 
-```powershell
-cd frontend
-npm install
-cd ..
-```
+5.  **Run the Server:**
+    ```bash
+    # Development
+    python -m app.main
 
-### 2. Configure environment variables
+    # Production
+    waitress-serve --port=7860 app.main:app
+    ```
 
-```powershell
-Copy-Item config/.env.example config/.env
-notepad config/.env    # fill in OPENAI_API_KEY and other options
-```
+### Frontend Setup
+1.  Navigate to the frontend directory:
+    ```bash
+    cd ../frontend
+    ```
 
-Key variables (see `config/.env.example` for full list):
+2.  Install packages:
+    ```bash
+    npm install
+    ```
 
-- `OPENAI_API_KEY` – required for chat completions
-- `EMBEDDING_MODEL` – Hugging Face embedding checkpoint (default `BAAI/bge-m3`)
-- `RERANK_MODEL` – Optional cross-encoder reranker (default `BAAI/bge-reranker-large`)
-- `CHAT_MODEL` – OpenAI chat model identifier (default `gpt-4o-mini`)
-- `PERSIST_DIR` – Vector-store folder (defaults to `chroma_db`)
-- Retrieval knobs: `RETRIEVER_K`, `POOL_SIZE`, `RERANK_TOP_K`, `CHUNK_SIZE`, `CHUNK_OVERLAP`
+3.  Start the development server:
+    ```bash
+    npm run dev
+    ```
+    Access the app at `http://localhost:5173`.
 
-### 3. Ingest the library collection
+## Example Usage
 
-```powershell
-$env:PYTHONPATH = (Resolve-Path .)
-python -m scripts.ingest
-```
+**Question:** "Quan niệm về chữ Nôm của tác giả là gì?"
 
-The script scans the `Word/` (or configured) document directory, chunks pages, embeds them, and persists the vectors to `chroma_db/`. Delete that folder to force a rebuild after config changes.
+**Response:**
+> Theo tác giả, chữ Nôm không chỉ là phương tiện ghi âm tiếng Việt mà còn phản ánh tư duy văn hóa độc lập của dân tộc... [1]
+>
+> **Sources:**
+> [1] Khái luận văn tự học Chữ Nôm – Chương 1 - p.15
 
-### 4. Run the FastAPI backend
-
-```powershell
-uvicorn app.main:app --reload --port 8000
-```
-
-The service exposes:
-
-- `GET /health` – Basic health probe
-- `POST /ask` – Accepts an `AskRequest` (question, top_k, pool_size, rerank toggle) and returns an `AskResponse` with answer text plus ordered source chunks.
-
-### 5. Start the React frontend
-
-```powershell
-cd frontend
-npm run dev
-```
-
-Open the printed URL (typically <http://localhost:5173>). Ensure the backend is reachable at <http://localhost:8000>; set `VITE_API_BASE` in `frontend/.env` if you deploy the API elsewhere.
-
----
-
-## User Experience
-
-- Prompt the model via the textarea and submit to trigger `/ask`.
-- The interface auto-scrolls to the freshly generated answer and briefly highlights the response card.
-- Citations list every retrieved chunk; use **Xem trích đoạn** to expand the passage or **Xem nhanh** to sync the built-in PDF preview.
-- The preview pane loads the best-matching document page, with a convenient “Mở toàn văn” button to open the full PDF in a new tab.
-
----
-
-## Development Workflow
-
-### Testing & Troubleshooting
-
-- **Backend imports failing**: run commands from the project root and export `PYTHONPATH` as shown above.
-- **Missing models**: the first ingestion may download multi-hundred MB checkpoints; keep the process running until it completes.
-- **Frontend network errors**: verify the backend base URL, or adjust `frontend/vite.config.ts` proxy if you introduce HTTPS or a different port.
-- **Refresh vector store**: `Remove-Item chroma_db -Recurse -Force` then re-run `scripts.ingest`.
-
-### Formatting & Linting
-
-- Backend adheres to standard `black`/`ruff` style (optional but recommended).
-- Frontend uses TypeScript + eslint presets from Vite (configurable via `frontend/eslint.config.js`).
-
-### Useful npm scripts (`frontend/package.json`)
-
-- `npm run dev` – Vite dev server with hot reload
-- `npm run build` – Production bundle (outputs to `frontend/dist/`)
-- `npm run preview` – Serve the production build locally
-
----
-
-## Deployment Notes
-
-- Backend can be containerized with Uvicorn + Gunicorn (check `uvicorn-gunicorn` images) and served behind a reverse proxy.
-- Persist `chroma_db/` on durable storage (e.g., Azure Files, AWS EFS, or local volume) so embeddings survive restarts.
-- Inject `OPENAI_API_KEY` and other secrets via your orchestration platform (GitHub Actions, Azure App Service, etc.).
-- Build the frontend with `npm run build` and host the static assets on a CDN or alongside the FastAPI app using `StaticFiles` if desired.
-
----
-
-## Roadmap Ideas
-
-1. Add streaming responses for incremental answer rendering.
-2. Introduce citation-based highlighting inside the PDF viewer.
-3. Expand ingestion to handle Markdown/HTML scraping pipelines.
-4. Implement authentication and usage analytics for multi-user deployments.
-
+*Clicking on [1] opens the PDF viewer to page 15 of "Khái luận văn tự học Chữ Nôm".*
